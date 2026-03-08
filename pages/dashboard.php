@@ -1,0 +1,707 @@
+<?php
+require_once __DIR__ . '/../includes/init.php';
+
+$page_title = "Dashboard";
+$msg = "";
+
+include "../includes/db.php";
+include "../modules/audit_trail.php";
+
+// Check admin access
+if (!isset($_SESSION['admin'])) {
+    header("Location: ../pages/index.php");
+    exit();
+}
+
+// CSRF token for security
+if (!isset($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+// Enhanced input sanitization
+function sanitize_input($conn, $data) {
+    return mysqli_real_escape_string($conn, trim(htmlspecialchars($data, ENT_QUOTES, 'UTF-8')));
+}
+
+// Add patient with better validation
+if (isset($_POST['add_patient'])) {
+    // CSRF protection
+    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
+        $msg = "❌ Security error: Invalid request.";
+    } else {
+        $name = sanitize_input($conn, $_POST['name'] ?? "");
+        $dob = sanitize_input($conn, $_POST['dob'] ?? "");
+        $gender = sanitize_input($conn, $_POST['gender'] ?? "");
+        $contact = sanitize_input($conn, $_POST['contact'] ?? "");
+        $address = sanitize_input($conn, $_POST['address'] ?? "");
+        $history = sanitize_input($conn, $_POST['history'] ?? "");
+
+        // Enhanced validation
+        if (empty($name)) {
+            $msg = "❌ Patient name is required.";
+        } elseif (strlen($name) < 2) {
+            $msg = "❌ Patient name must be at least 2 characters.";
+        } elseif (!empty($dob) && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $dob)) {
+            $msg = "❌ Invalid date format. Use YYYY-MM-DD.";
+        } elseif (!empty($dob) && strtotime($dob) > time()) {
+            $msg = "❌ Date of birth cannot be in the future.";
+        } else {
+            // Check for duplicates
+            $check_stmt = $conn->prepare("SELECT id FROM patients WHERE fullname = ? AND dob = ? LIMIT 1");
+            $check_stmt->bind_param("ss", $name, $dob);
+            $check_stmt->execute();
+            
+            if ($check_stmt->get_result()->num_rows > 0) {
+                $msg = "⚠️ A patient with this name and DOB already exists.";
+                $check_stmt->close();
+            } else {
+                $check_stmt->close();
+                
+                $stmt = $conn->prepare("INSERT INTO patients (fullname, dob, gender, contact, address, history) VALUES (?,?,?,?,?,?)");
+                if ($stmt && $stmt->bind_param("ssssss", $name, $dob, $gender, $contact, $address, $history) && $stmt->execute()) {
+                    $patient_id = $conn->insert_id;
+                    
+                    // Log audit trail
+                    $new_values = compact('name', 'dob', 'gender', 'contact', 'address', 'history');
+                    log_audit($conn, 'INSERT', 'patients', $patient_id, $patient_id, null, $new_values);
+                    
+                    $msg = "✅ Patient added successfully.";
+                    $stmt->close();
+                } else {
+                    $msg = "❌ Error adding patient. Please try again.";
+                }
+            }
+        }
+        
+        // Regenerate CSRF token
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    }
+}
+
+// Get statistics with better error handling
+$stats = [
+    'patients' => 0, 'medical_history' => 0, 'medications' => 0, 'vitals' => 0,
+    'diagnostics' => 0, 'treatment_plans' => 0, 'lab_results' => 0, 'progress_notes' => 0
+];
+
+foreach ($stats as $table => $value) {
+    try {
+        $stmt = $conn->prepare("SELECT COUNT(*) as count FROM `$table`");
+        if ($stmt && $stmt->execute()) {
+            $result = $stmt->get_result();
+            if ($row = $result->fetch_assoc()) {
+                $stats[$table] = intval($row['count']);
+            }
+            $stmt->close();
+        }
+    } catch (Exception $e) {
+        // Keep default value of 0
+    }
+}
+?>
+<?php include "../includes/header.php"; ?>
+
+<?php if (!empty($msg)): ?>
+  <div class="container mt-3">
+    <div class="alert <?php echo strpos($msg, '✅') !== false ? 'alert-success' : (strpos($msg, '⚠️') !== false ? 'alert-warning' : 'alert-danger'); ?> alert-dismissible fade show">
+      <?php echo htmlspecialchars($msg); ?>
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+  </div>
+<?php endif; ?>
+
+<div class="container-fluid px-4 py-4 br">
+  <!-- Dashboard Header -->
+  <div class="row mb-4">
+    <div class="col-12">
+      <div class="welcome-card">
+        <h1 class="dashboard-title">Dashboard Overview</h1>
+        <p class="welcome-text">Welcome back, <?php echo htmlspecialchars($_SESSION['admin'] ?? 'Admin'); ?>! Here's your system overview.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats Grid -->
+  <div class="row g-3 mb-4">
+    <div class="col-xl-3 col-md-6">
+      <div class="stat-card stat-card-patients">
+        <div class="stat-icon">
+          <i class="bi bi-people-fill fs-3"></i>
+        </div>
+        <div class="stat-value" data-target="<?php echo $stats['patients']; ?>">0</div>
+        <div class="stat-label">Total Patients</div>
+      </div>
+    </div>
+
+    <div class="col-xl-3 col-md-6">
+      <div class="stat-card stat-card-vitals">
+        <div class="stat-icon">
+          <i class="bi bi-heart-pulse fs-3"></i>
+        </div>
+        <div class="stat-value" data-target="<?php echo $stats['vitals']; ?>">0</div>
+        <div class="stat-label">Vital Records</div>
+      </div>
+    </div>
+
+    <div class="col-xl-3 col-md-6">
+      <div class="stat-card stat-card-medications">
+        <div class="stat-icon">
+          <i class="bi bi-capsule fs-3"></i>
+        </div>
+        <div class="stat-value" data-target="<?php echo $stats['medications']; ?>">0</div>
+        <div class="stat-label">Medications</div>
+      </div>
+    </div>
+
+    <div class="col-xl-3 col-md-6">
+      <div class="stat-card stat-card-lab">
+        <div class="stat-icon">
+          <i class="bi bi-clipboard-data fs-3"></i>
+        </div>
+        <div class="stat-value" data-target="<?php echo $stats['lab_results']; ?>">0</div>
+        <div class="stat-label">Lab Results</div>
+      </div>
+    </div>
+  </div>
+  <!-- Quick Actions Section -->
+  <div class="row mb-4">
+    <div class="col-12">
+      <h2 class="section-title">Quick Actions</h2>
+    </div>
+  </div>
+
+  <div class="action-grid mb-4">
+    <div class="action-card" data-bs-toggle="modal" data-bs-target="#addPatientModal">
+      <div class="action-icon">
+        <i class="bi bi-person-plus fs-4"></i>
+      </div>
+      <h3 class="action-title">Add New Patient</h3>
+    </div>
+    <a href="../modules/patients.php" class="action-card text-decoration-none">
+      <div class="action-icon">
+        <i class="bi bi-people fs-4"></i>
+      </div>
+      <h3 class="action-title">Manage Patients</h3>
+    </a>
+  </div>
+
+  <!-- Medical Summary Section -->
+  <div class="row mb-4">
+    <div class="col-12">
+      <h2 class="section-title">Medical Summary</h2>
+    </div>
+  </div>
+
+  <div class="row g-4">
+    <div class="col-lg-8">
+      <div class="chart-container">
+        <canvas id="medicalBarChart"></canvas>
+      </div>
+    </div>
+    <div class="col-lg-4">
+      <div class="chart-container">
+        <canvas id="medicalDonutChart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Patient List Section -->
+  <div class="row mb-4">
+    <div class="col-12">
+      <h2 class="section-title">Patient List</h2>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col-12">
+      <div class="chart-container">
+        <!-- Search bar -->
+        <div class="mb-3">
+          <div class="input-group rounded search-input-group">
+            <input type="search" id="patientSearch" class="form-control rounded" placeholder="Search patient name or patient ID" aria-label="Search" aria-describedby="search-addon" />
+            <span class="input-group-text border-0" id="search-addon">
+              <i class="bi bi-search"></i>
+            </span>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-striped table-hover" id="patientsTable">
+            <thead class="table-dark">
+              <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>DOB</th>
+                <th>Age</th>
+                <th>Gender</th>
+                <th>Contact</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+            <?php
+            $res = $conn->query("SELECT * FROM patients ORDER BY fullname");
+            if ($res && $res->num_rows > 0):
+              while ($r = $res->fetch_assoc()):
+                // Fetch additional medical data with prepared statements
+                $medical_data = [];
+                $tables = ['medical_history', 'medications', 'vitals', 'diagnostics', 'treatment_plans', 'lab_results', 'progress_notes', 'physical_assessments'];
+
+                foreach ($tables as $table) {
+                  $stmt = $conn->prepare("SELECT * FROM `$table` WHERE patient_id = ?");
+                  if ($stmt && $stmt->bind_param("i", $r['id']) && $stmt->execute()) {
+                    $result = $stmt->get_result();
+                    $medical_data[$table] = [];
+                    while ($row = $result->fetch_assoc()) {
+                      $medical_data[$table][] = $row;
+                    }
+                    $stmt->close();
+                  }
+                }
+            ?>
+              <tr>
+                <td class="patient-id"><?php echo htmlspecialchars($r['id']); ?></td>
+                <td class="patient-name"><?php echo htmlspecialchars($r['fullname']); ?></td>
+                <td><?php echo htmlspecialchars($r['dob'] ?: 'N/A'); ?></td>
+                <td><?php echo htmlspecialchars($r['age'] ?: 'N/A'); ?></td>
+                <td><?php echo htmlspecialchars($r['gender'] ?: 'N/A'); ?></td>
+                <td><?php echo htmlspecialchars($r['contact'] ?: 'N/A'); ?></td>
+                <td>
+                  <div class="btn-group btn-group-sm" role="group">
+                    <a class="btn btn-outline-primary" href="../modules/patients.php?edit=<?php echo $r['id']; ?>" title="Edit">
+                      <i class="bi bi-pencil"></i>
+                    </a>
+                    <button class="btn btn-outline-info" data-bs-toggle="modal" data-bs-target="#summaryModal"
+                            data-patient='<?php echo htmlspecialchars(json_encode(array_merge($r, $medical_data)), ENT_QUOTES); ?>' title="Summary">
+                      <i class="bi bi-eye"></i>
+                    </button>
+                    <a class="btn btn-outline-danger"
+                       href="../modules/patients.php?delete=<?php echo $r['id']; ?>&csrf_token=<?php echo $_SESSION['csrf_token']; ?>"
+                       onclick="return confirm('Delete patient and all related records?')" title="Delete">
+                      <i class="bi bi-trash"></i>
+                    </a>
+                    <a class="btn btn-outline-secondary" href="../modules/patient_dashboard.php?patient_id=<?php echo $r['id']; ?>" title="Record Vitals">Record</a>
+                  </div>
+                </td>
+              </tr>
+            <?php
+              endwhile;
+            else:
+            ?>
+              <tr>
+                <td colspan="7" class="text-center text-muted">No patients found.</td>
+              </tr>
+            <?php endif; ?>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add Patient Modal -->
+<div class="modal fade" id="addPatientModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-person-plus me-2"></i>Add New Patient</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" novalidate>
+        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>">
+        <div class="modal-body p-4">
+          <div class="row g-3">
+            <div class="col-12">
+              <label for="name" class="form-label">Full Name <span class="text-danger">*</span></label>
+              <div class="input-group">
+                <span class="input-group-text"><i class="bi bi-person"></i></span>
+                <input type="text" class="form-control" id="name" name="name" required maxlength="100" placeholder="Enter patient's full name">
+              </div>
+            </div>
+            <div class="col-md-6">
+              <label for="dob" class="form-label">Date of Birth</label>
+              <div class="input-group">
+                <span class="input-group-text"><i class="bi bi-calendar"></i></span>
+                <input type="date" class="form-control" id="dob" name="dob" max="<?php echo date('Y-m-d'); ?>">
+              </div>
+            </div>
+            <div class="col-md-6">
+              <label for="gender" class="form-label">Gender</label>
+              <div class="input-group">
+                <span class="input-group-text"><i class="bi bi-gender-ambiguous"></i></span>
+                <select class="form-select" id="gender" name="gender">
+                  <option value="">Select Gender</option>
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+            </div>
+            <div class="col-12">
+              <label for="contact" class="form-label">Contact</label>
+              <div class="input-group">
+                <span class="input-group-text"><i class="bi bi-telephone"></i></span>
+                <input type="tel" class="form-control" id="contact" name="contact" maxlength="20" placeholder="Phone number">
+              </div>
+            </div>
+            <div class="col-12">
+              <label for="address" class="form-label">Address</label>
+              <div class="input-group">
+                <span class="input-group-text"><i class="bi bi-geo-alt"></i></span>
+                <textarea class="form-control" id="address" name="address" rows="2" maxlength="500" placeholder="Patient's address"></textarea>
+              </div>
+            </div>
+            <div class="col-12">
+              <label for="history" class="form-label">Medical History</label>
+              <div class="input-group">
+                <span class="input-group-text"><i class="bi bi-journal-medical"></i></span>
+                <textarea class="form-control" id="history" name="history" rows="3" maxlength="1000" placeholder="Brief medical history (optional)"></textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" name="add_patient" class="btn btn-primary">
+            <i class="bi bi-person-plus me-2"></i>Add Patient
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Summary Modal -->
+<div class="modal fade" id="summaryModal" tabindex="-1" aria-labelledby="summaryModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="summaryModalLabel">
+                    <i class="bi bi-person-fill me-2"></i>Patient Demographics
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row">
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-body">
+                                <div id="personalInfo"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="../assets/vendor/chartjs/chart.umd.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Auto-dismiss alerts after 5 seconds
+    setTimeout(function() {
+        const alerts = document.querySelectorAll('.alert');
+        alerts.forEach(alert => {
+            const bsAlert = new bootstrap.Alert(alert);
+            if (bsAlert) bsAlert.close();
+        });
+    }, 5000);
+
+    // Basic form validation
+    const form = document.querySelector('#addPatientModal form');
+    if (form) {
+        form.addEventListener('submit', function(e) {
+            const name = document.getElementById('name').value.trim();
+            const dob = document.getElementById('dob').value;
+            
+            if (name.length < 2) {
+                e.preventDefault();
+                alert('Patient name must be at least 2 characters long.');
+                return;
+            }
+            
+            if (dob && new Date(dob) > new Date()) {
+                e.preventDefault();
+                alert('Date of birth cannot be in the future.');
+                return;
+            }
+        });
+    }
+
+    // Counter animation
+    function animateCounter(element, target) {
+        let current = 0;
+        const increment = target / 100;
+        const timer = setInterval(() => {
+            current += increment;
+            if (current >= target) {
+                element.textContent = Math.floor(target);
+                clearInterval(timer);
+            } else {
+                element.textContent = Math.floor(current);
+            }
+        }, 20);
+    }
+
+    // Animate all stat counters
+    document.querySelectorAll('.stat-value').forEach(counter => {
+        const target = parseInt(counter.getAttribute('data-target'));
+        animateCounter(counter, target);
+    });
+
+    // Medical Summary Charts
+    const stats = <?php echo json_encode($stats); ?>;
+    const labels = [
+        'Patients',
+        'Medical Histories',
+        'Medications',
+        'Vital Signs',
+        'Diagnostics',
+        'Treatment Plans',
+        'Lab Results',
+        'Progress Notes'
+    ];
+    const data = [
+        stats.patients,
+        stats.medical_history,
+        stats.medications,
+        stats.vitals,
+        stats.diagnostics,
+        stats.treatment_plans,
+        stats.lab_results,
+        stats.progress_notes
+    ];
+    const totalRecords = data.reduce((a, b) => a + b, 0);
+
+    // Bar Chart
+    const barCtx = document.getElementById('medicalBarChart').getContext('2d');
+    new Chart(barCtx, {
+        data: {
+            labels: labels,
+            datasets: [{
+                type: 'bar',
+                label: 'Records',
+                data: data,
+                backgroundColor: 'rgba(14, 165, 233, 0.85)',
+                borderColor: 'rgba(14, 165, 233, 1)',
+                borderWidth: 1,
+                borderRadius: 6
+            }, {
+                type: 'line',
+                label: 'Cumulative',
+                data: data.map((d, i) => data.slice(0, i+1).reduce((a, b) => a + b, 0)),
+                borderColor: '#2563eb',
+                backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                borderWidth: 2,
+                fill: true,
+                tension: 0.3,
+                pointRadius: 4,
+                pointBackgroundColor: '#2563eb',
+                pointBorderColor: '#fff',
+                pointBorderWidth: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            interaction: {
+                mode: 'index',
+                intersect: false
+            },
+            plugins: {
+                legend: {
+                    display: true,
+                    position: 'top',
+                    labels: {
+                        padding: 15,
+                        usePointStyle: true,
+                        font: {
+                            size: 12,
+                            weight: '500'
+                        }
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        stepSize: 1,
+                        font: {
+                            size: 11
+                        }
+                    },
+                    grid: {
+                        color: 'rgba(0, 0, 0, 0.05)'
+                    }
+                },
+                x: {
+                    ticks: {
+                        font: {
+                            size: 10
+                        }
+                    },
+                    grid: {
+                        display: false
+                    }
+                }
+            }
+        }
+    });
+
+    // Donut Chart
+    const donutCtx = document.getElementById('medicalDonutChart').getContext('2d');
+    new Chart(donutCtx, {
+        type: 'doughnut',
+        data: {
+            labels: labels,
+            datasets: [{
+                data: data,
+                backgroundColor: [
+                    '#16A34A',
+                    '#15803D',
+                    '#22C55E',
+                    '#3B82F6',
+                    '#F59E0B',
+                    '#EF4444',
+                    '#0F172A',
+                    '#64748B'
+                ],
+                borderWidth: 3,
+                borderColor: '#ffffff'
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                    labels: {
+                        padding: 10,
+                        usePointStyle: true,
+                        font: {
+                            size: 10
+                        }
+                    }
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            const value = context.parsed || 0;
+                            const percentage = totalRecords > 0 ? ((value / totalRecords) * 100).toFixed(1) : 0;
+                            return context.label + ': ' + value + ' (' + percentage + '%)';
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Patient Search Functionality
+    const patientSearch = document.getElementById('patientSearch');
+    const patientsTable = document.getElementById('patientsTable');
+    const tableRows = patientsTable.querySelectorAll('tbody tr');
+
+    patientSearch.addEventListener('input', function() {
+        const searchTerm = this.value.toLowerCase().trim();
+
+        tableRows.forEach(row => {
+            const patientId = row.querySelector('.patient-id').textContent.toLowerCase();
+            const patientName = row.querySelector('.patient-name').textContent.toLowerCase();
+
+            if (patientId.includes(searchTerm) || patientName.includes(searchTerm)) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        });
+    });
+
+    // Summary Modal Handling
+    const summaryModal = document.getElementById('summaryModal');
+    summaryModal.addEventListener('show.bs.modal', function(event) {
+        const button = event.relatedTarget;
+        const patientData = JSON.parse(button.getAttribute('data-patient'));
+
+        const personalInfo = document.getElementById('personalInfo');
+        personalInfo.innerHTML = `
+            <h5 class="mb-3">Personal Information</h5>
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <strong>ID:</strong> ${patientData.id}
+                </div>
+                <div class="col-md-6">
+                    <strong>Name:</strong> ${patientData.fullname}
+                </div>
+                <div class="col-md-6">
+                    <strong>Date of Birth:</strong> ${patientData.dob || 'N/A'}
+                </div>
+                <div class="col-md-6">
+                    <strong>Age:</strong> ${patientData.age || 'N/A'}
+                </div>
+                <div class="col-md-6">
+                    <strong>Gender:</strong> ${patientData.gender || 'N/A'}
+                </div>
+                <div class="col-md-6">
+                    <strong>Contact:</strong> ${patientData.contact || 'N/A'}
+                </div>
+                <div class="col-12">
+                    <strong>Address:</strong> ${patientData.address || 'N/A'}
+                </div>
+                <div class="col-12">
+                    <strong>Medical History:</strong> ${patientData.history || 'N/A'}
+                </div>
+            </div>
+
+            <hr class="my-4">
+
+            <h5 class="mb-3">Medical Records Summary</h5>
+            <div class="row g-3">
+                <div class="col-md-3">
+                    <div class="text-center">
+                        <div class="stat-icon stat-icon-sm mx-auto mb-2">
+                            <i class="bi bi-journal-medical"></i>
+                        </div>
+                        <strong>${patientData.medical_history ? patientData.medical_history.length : 0}</strong><br>
+                        <small class="text-muted">Medical Histories</small>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="text-center">
+                        <div class="stat-icon stat-icon-sm mx-auto mb-2">
+                            <i class="bi bi-capsule"></i>
+                        </div>
+                        <strong>${patientData.medications ? patientData.medications.length : 0}</strong><br>
+                        <small class="text-muted">Medications</small>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="text-center">
+                        <div class="stat-icon stat-icon-sm mx-auto mb-2">
+                            <i class="bi bi-heart-pulse"></i>
+                        </div>
+                        <strong>${patientData.vitals ? patientData.vitals.length : 0}</strong><br>
+                        <small class="text-muted">Vital Records</small>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="text-center">
+                        <div class="stat-icon stat-icon-sm mx-auto mb-2">
+                            <i class="bi bi-clipboard-data"></i>
+                        </div>
+                        <strong>${patientData.lab_results ? patientData.lab_results.length : 0}</strong><br>
+                        <small class="text-muted">Lab Results</small>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+});
+</script>
+
+<?php include "../includes/footer.php"; ?>
